@@ -2318,6 +2318,12 @@ inline std::string AeriumPatchesDataSource::BuildPage() {
  <h1>What this build changes</h1>
  <p class="lede">Aerium for Android is Chromium )",
       base::EscapeForHTML(std::string(kAeriumChromiumVersion)),
+      (std::string(kAeriumBuildNumber).empty()
+           ? std::string()
+           : base::StrCat({" (build ",
+                           base::EscapeForHTML(
+                               std::string(kAeriumBuildNumber)),
+                           ")"})),
       R"( with the changes below
  applied, in this order: GrapheneOS's Vanadium patches first, then Aerium's own
  build scripts on top. The list is generated during the build from the patch

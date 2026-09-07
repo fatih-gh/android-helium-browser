@@ -388,6 +388,7 @@ fi
 if [ -f "$APH" ]; then
     "$SCRIPT_DIR/devutils/generate_patch_manifest.py" \
         --version "$VERSION" \
+        --build-number "${GITHUB_RUN_NUMBER:-}" \
         --out chrome/browser/ui/webui/aerium_patch_manifest.inc
 fi
 

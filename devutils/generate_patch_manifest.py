@@ -194,6 +194,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument("--version", default="")
+    # The CI run number, so a build can say which build it is. Empty for a
+    # local build, which is the honest answer there - there is no run.
+    parser.add_argument("--build-number", default="")
     parser.add_argument(
         "--patches", default=os.path.join(ROOT, "vanadium", "patches")
     )
@@ -233,6 +236,8 @@ def main():
         "",
         'inline constexpr char kAeriumChromiumVersion[] = "%s";'
         % cpp_string(version),
+        'inline constexpr char kAeriumBuildNumber[] = "%s";'
+        % cpp_string(args.build_number),
         "",
         "inline constexpr AeriumPatchEntry kAeriumPatches[] = {",
     ]
