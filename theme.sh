@@ -6406,6 +6406,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import org.chromium.base.IntentUtils;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
 import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
@@ -6463,10 +6464,26 @@ public class AeriumSpeedDial extends LinearLayout {
         rebuild();
     }
 
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        // Aerium: the settings screen writes the preferences this reads, and an already-inflated
+        // new tab page would otherwise keep the old grid until the tab was closed. Rebuilding on
+        // attach is what makes a change in Settings show up on the way back.
+        mEditing = false;
+        rebuild();
+    }
+
     /** Whether the speed dial replaces the Most Visited tiles. Default on. */
     public static boolean isEnabled() {
         return ChromeSharedPreferences.getInstance()
                 .readBoolean(ChromePreferenceKeys.AERIUM_SPEED_DIAL, true);
+    }
+
+    /** Whether the Bookmarks / History / Downloads row sits under the grid. Default on. */
+    private static boolean showShortcutRow() {
+        return ChromeSharedPreferences.getInstance()
+                .readBoolean(ChromePreferenceKeys.AERIUM_SPEED_DIAL_SHORTCUTS, true);
     }
 
     private static int columns() {
@@ -6556,6 +6573,75 @@ public class AeriumSpeedDial extends LinearLayout {
             grid.addView(buildAddTile());
         }
         addView(grid);
+
+        if (showShortcutRow()) {
+            addView(buildShortcutRow());
+        }
+    }
+
+    /**
+     * Aerium: Bookmarks, History and Downloads, opened as native pages.
+     *
+     * <p>These go through a TRUSTED intent rather than the plain one the shortcuts use.
+     * patch.sh deliberately limits the system dispatcher to network URLs, so an ordinary VIEW
+     * intent carrying chrome://bookmarks would be dropped; IntentUtils.addTrustedIntentExtras
+     * marks it as coming from the browser itself, which is what the app menu's own entries
+     * amount to. The alternative was BookmarkUtils, HistoryManagerUtils and DownloadUtils, which
+     * between them want an Activity, a Tab and a Profile - three couplings into stacks this view
+     * is deliberately kept out of, to open three pages.
+     */
+    private View buildShortcutRow() {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(HORIZONTAL);
+        LinearLayout.LayoutParams rowParams =
+                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+        rowParams.topMargin = dp(6);
+        row.setLayoutParams(rowParams);
+
+        row.addView(buildShortcut(R.string.aerium_speed_dial_bookmarks, "chrome://bookmarks/", 0));
+        row.addView(buildShortcut(R.string.aerium_speed_dial_history, "chrome://history/", dp(10)));
+        row.addView(
+                buildShortcut(R.string.aerium_speed_dial_downloads, "chrome://downloads/", dp(10)));
+        return row;
+    }
+
+    private View buildShortcut(int labelRes, final String url, int startMargin) {
+        TextView pill = new TextView(getContext());
+        pill.setText(labelRes);
+        pill.setTextColor(0xFFD8E6F5);
+        pill.setTextSize(12);
+        pill.setGravity(Gravity.CENTER);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setShape(GradientDrawable.RECTANGLE);
+        shape.setCornerRadius(dp(14));
+        shape.setColor(Color.TRANSPARENT);
+        shape.setStroke(dp(1), OUTLINE);
+        pill.setBackground(shape);
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        params.leftMargin = startMargin;
+        pill.setLayoutParams(params);
+
+        pill.setOnClickListener(
+                new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        openInternal(url);
+                    }
+                });
+        return pill;
+    }
+
+    private void openInternal(String url) {
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        intent.setPackage(getContext().getPackageName());
+        intent.putExtra(Browser.EXTRA_APPLICATION_ID, getContext().getPackageName());
+        IntentUtils.addTrustedIntentExtras(intent);
+        try {
+            getContext().startActivity(intent);
+        } catch (RuntimeException e) {
+            // Nothing to do: the row simply does not open.
+        }
     }
 
     private GridLayout.LayoutParams cellParams() {
@@ -6835,3 +6921,182 @@ sed_i 's|      <message name="IDS_MENU_DEV_TOOLS" desc=|      <message name="IDS
     chrome/browser/ui/android/strings/android_chrome_strings.grd
 
 echo "[aerium] speed dial applied"
+
+# --- Settings -> New tab page.
+#
+# The screen behind the speed dial. Ordered 21, between Homepage (20) and
+# Notifications (22) - read out of main_preferences.xml rather than guessed,
+# because 24 is already the Media row this script adds and a duplicate order
+# would leave the two ordered by title.
+#
+# No restart snackbar here, unlike the Media screen: nothing on this page turns
+# into a command-line switch. AeriumSpeedDial rebuilds itself in
+# onAttachedToWindow, so a change shows the moment the new tab page comes back.
+cat > chrome/android/java/res/xml/aerium_ntp_preferences.xml <<'AERIUM_NTP_XML'
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright 2026 The Chromium Authors
+     Use of this source code is governed by a BSD-style license that can be
+     found in the LICENSE file. -->
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+    <org.chromium.components.browser_ui.settings.ChromeSwitchPreference
+        android:key="aerium_speed_dial"
+        android:persistent="false"
+        android:title="@string/aerium_ntp_speed_dial_title"
+        android:summary="@string/aerium_ntp_speed_dial_summary" />
+    <org.chromium.components.browser_ui.settings.ChromeSwitchPreference
+        android:key="aerium_speed_dial_three"
+        android:persistent="false"
+        android:title="@string/aerium_ntp_three_title"
+        android:summary="@string/aerium_ntp_three_summary" />
+    <org.chromium.components.browser_ui.settings.ChromeSwitchPreference
+        android:key="aerium_speed_dial_shortcuts"
+        android:persistent="false"
+        android:title="@string/aerium_ntp_shortcut_row_title"
+        android:summary="@string/aerium_ntp_shortcut_row_summary" />
+    <Preference
+        android:key="aerium_speed_dial_clear"
+        android:persistent="false"
+        android:title="@string/aerium_ntp_clear_title"
+        android:summary="@string/aerium_ntp_clear_summary" />
+</PreferenceScreen>
+AERIUM_NTP_XML
+
+sed_i 's|^  "java/res/xml/aerium_media_preferences.xml",$|  "java/res/xml/aerium_ntp_preferences.xml",\n&|' \
+    chrome/android/chrome_java_resources.gni
+
+cat > chrome/android/java/src/org/chromium/chrome/browser/settings/AeriumNewTabPageFragment.java <<'AERIUM_NTP_JAVA'
+// Copyright 2026 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+package org.chromium.chrome.browser.settings;
+
+import android.os.Bundle;
+
+import androidx.preference.Preference;
+
+import org.chromium.base.supplier.MonotonicObservableSupplier;
+import org.chromium.base.supplier.ObservableSuppliers;
+import org.chromium.base.supplier.SettableMonotonicObservableSupplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.R;
+import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+import org.chromium.chrome.browser.settings.search.ChromeBaseSearchIndexProvider;
+import org.chromium.components.browser_ui.settings.ChromeSwitchPreference;
+import org.chromium.components.browser_ui.settings.SettingsFragment;
+import org.chromium.components.browser_ui.settings.SettingsUtils;
+
+/**
+ * Aerium: Settings -> New tab page. See theme.sh.
+ *
+ * <p>Everything here is read by AeriumSpeedDial when it draws, and it redraws in
+ * onAttachedToWindow, so nothing on this screen needs a restart. The values live in
+ * ChromeSharedPreferences rather than the preference framework's own store, which is why every
+ * entry is android:persistent="false".
+ */
+@NullMarked
+public class AeriumNewTabPageFragment extends ChromeBaseSettingsFragment {
+    // Must match the keys in aerium_ntp_preferences.xml.
+    private static final String PREF_SPEED_DIAL = "aerium_speed_dial";
+    private static final String PREF_THREE_PER_ROW = "aerium_speed_dial_three";
+    private static final String PREF_SHORTCUT_ROW = "aerium_speed_dial_shortcuts";
+    private static final String PREF_CLEAR = "aerium_speed_dial_clear";
+
+    private final SettableMonotonicObservableSupplier<String> mPageTitle =
+            ObservableSuppliers.createMonotonic();
+
+    @Override
+    public void onCreatePreferences(@Nullable Bundle savedInstanceState, @Nullable String rootKey) {
+        SettingsUtils.addPreferencesFromResource(this, R.xml.aerium_ntp_preferences);
+        mPageTitle.set(getString(R.string.aerium_ntp_title));
+
+        bindSwitch(PREF_SPEED_DIAL, ChromePreferenceKeys.AERIUM_SPEED_DIAL, true);
+        bindSwitch(PREF_SHORTCUT_ROW, ChromePreferenceKeys.AERIUM_SPEED_DIAL_SHORTCUTS, true);
+        bindColumns();
+        bindClear();
+    }
+
+    private void bindSwitch(String prefKey, String sharedPrefKey, boolean defaultValue) {
+        ChromeSwitchPreference pref = (ChromeSwitchPreference) findPreference(prefKey);
+        if (pref == null) return;
+        pref.setChecked(
+                ChromeSharedPreferences.getInstance().readBoolean(sharedPrefKey, defaultValue));
+        pref.setOnPreferenceChangeListener(
+                (preference, newValue) -> {
+                    ChromeSharedPreferences.getInstance()
+                            .writeBoolean(sharedPrefKey, (boolean) newValue);
+                    return true;
+                });
+    }
+
+    /**
+     * A switch rather than a list, because the choice is between three and four and a two-value
+     * list is a switch wearing a hat. The key stores the column count itself so the drawing code
+     * reads a number rather than inverting a boolean.
+     */
+    private void bindColumns() {
+        ChromeSwitchPreference pref = (ChromeSwitchPreference) findPreference(PREF_THREE_PER_ROW);
+        if (pref == null) return;
+        pref.setChecked(
+                ChromeSharedPreferences.getInstance()
+                                .readInt(ChromePreferenceKeys.AERIUM_SPEED_DIAL_COLUMNS, 4)
+                        == 3);
+        pref.setOnPreferenceChangeListener(
+                (preference, newValue) -> {
+                    ChromeSharedPreferences.getInstance()
+                            .writeInt(
+                                    ChromePreferenceKeys.AERIUM_SPEED_DIAL_COLUMNS,
+                                    ((boolean) newValue) ? 3 : 4);
+                    return true;
+                });
+    }
+
+    private void bindClear() {
+        Preference pref = findPreference(PREF_CLEAR);
+        if (pref == null) return;
+        pref.setOnPreferenceClickListener(
+                preference -> {
+                    ChromeSharedPreferences.getInstance()
+                            .writeString(ChromePreferenceKeys.AERIUM_SPEED_DIAL_TILES, "");
+                    return true;
+                });
+    }
+
+    @Override
+    public MonotonicObservableSupplier<String> getPageTitle() {
+        return mPageTitle;
+    }
+
+    @Override
+    public @SettingsFragment.AnimationType int getAnimationType() {
+        return SettingsFragment.AnimationType.PROPERTY;
+    }
+
+    public static final ChromeBaseSearchIndexProvider SEARCH_INDEX_DATA_PROVIDER =
+            new ChromeBaseSearchIndexProvider(
+                    AeriumNewTabPageFragment.class.getName(), R.xml.aerium_ntp_preferences);
+}
+AERIUM_NTP_JAVA
+
+sed_i 's|^  "java/src/org/chromium/chrome/browser/settings/AeriumMediaFragment.java",$|  "java/src/org/chromium/chrome/browser/settings/AeriumNewTabPageFragment.java",\n&|' \
+    chrome/android/chrome_java_sources.gni
+
+sed_i 's|^        android:key="notifications"$|        android:key="aerium_new_tab_page"\n        android:order="21"\n        android:fragment="org.chromium.chrome.browser.settings.AeriumNewTabPageFragment"\n        android:title="@string/aerium_ntp_title" />\n    <Preference\n&|' \
+    chrome/android/java/res/xml/main_preferences.xml
+
+sed_i 's|^import org.chromium.chrome.browser.settings.AeriumMediaFragment;$|&\nimport org.chromium.chrome.browser.settings.AeriumNewTabPageFragment;|' \
+    $SIPR
+sed_i 's|^                    AeriumMediaFragment.SEARCH_INDEX_DATA_PROVIDER,$|&\n                    AeriumNewTabPageFragment.SEARCH_INDEX_DATA_PROVIDER,|' \
+    $SIPR
+
+sed_i 's|      <message name="IDS_AERIUM_SPEED_DIAL_ADD" desc=|      <message name="IDS_AERIUM_SPEED_DIAL_BOOKMARKS" desc="Label on the new tab page button that opens bookmarks.">\n        Bookmarks\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_HISTORY" desc="Label on the new tab page button that opens history.">\n        History\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_DOWNLOADS" desc="Label on the new tab page button that opens downloads.">\n        Downloads\n      </message>\n      <message name="IDS_AERIUM_NTP_TITLE" desc="Title of the New tab page settings screen.">\n        New tab page\n      </message>\n      <message name="IDS_AERIUM_NTP_SPEED_DIAL_TITLE" desc="Title of the switch that shows the speed dial instead of the most visited tiles.">\n        Show shortcuts\n      </message>\n      <message name="IDS_AERIUM_NTP_SPEED_DIAL_SUMMARY" desc="Summary under that switch.">\n        A grid you arrange yourself, in place of the sites Aerium guesses from your history.\n      </message>\n      <message name="IDS_AERIUM_NTP_THREE_TITLE" desc="Title of the switch that puts three shortcuts on a row instead of four.">\n        Three shortcuts per row\n      </message>\n      <message name="IDS_AERIUM_NTP_THREE_SUMMARY" desc="Summary under that switch.">\n        Fewer, larger shortcuts. Off puts four on a row.\n      </message>\n      <message name="IDS_AERIUM_NTP_SHORTCUT_ROW_TITLE" desc="Title of the switch that shows the bookmarks, history and downloads row.">\n        Bookmarks, history and downloads\n      </message>\n      <message name="IDS_AERIUM_NTP_SHORTCUT_ROW_SUMMARY" desc="Summary under that switch.">\n        A row of three buttons under the shortcuts.\n      </message>\n      <message name="IDS_AERIUM_NTP_CLEAR_TITLE" desc="Title of the entry that removes every shortcut.">\n        Clear all shortcuts\n      </message>\n      <message name="IDS_AERIUM_NTP_CLEAR_SUMMARY" desc="Summary under that entry.">\n        Empties the grid. The sites themselves are not touched.\n      </message>\n&|' \
+    chrome/browser/ui/android/strings/android_chrome_strings.grd
+
+sed_i 's|    public static final String AERIUM_SPEED_DIAL_ROWS = "Chrome.Aerium.SpeedDialRows";|&\n\n    /** Whether the bookmarks, history and downloads row sits under the speed dial. */\n    public static final String AERIUM_SPEED_DIAL_SHORTCUTS = "Chrome.Aerium.SpeedDialShortcuts";|' \
+    $CPK
+sed_i 's|^                AERIUM_SPEED_DIAL_ROWS,$|&\n                AERIUM_SPEED_DIAL_SHORTCUTS,|' \
+    $CPK
+
+echo "[aerium] new tab page settings applied"
