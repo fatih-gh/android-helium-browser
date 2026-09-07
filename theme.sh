@@ -2562,7 +2562,7 @@ class AeriumExtensions : public content::WebUIController,
   void FileSelectionCanceled() override;
 
  private:
-  void HandlePick(const base::Value::List& args);
+  void HandlePick(const base::ListValue& args);
   void InstallFrom(const base::FilePath& path);
   void OnCopied(const base::FilePath& copy, bool ok);
   void Status(const std::string& text);
@@ -2593,7 +2593,7 @@ inline void AeriumExtensions::Status(const std::string& text) {
                                          base::Value(text));
 }
 
-inline void AeriumExtensions::HandlePick(const base::Value::List& args) {
+inline void AeriumExtensions::HandlePick(const base::ListValue& args) {
   if (dialog_) {
     return;
   }
