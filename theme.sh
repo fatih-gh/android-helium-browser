@@ -2435,10 +2435,14 @@ cat > chrome/browser/ui/webui/aerium_extensions.h <<'AERIUM_EXTENSIONS_H'
 #ifndef CHROME_BROWSER_UI_WEBUI_AERIUM_EXTENSIONS_H_
 #define CHROME_BROWSER_UI_WEBUI_AERIUM_EXTENSIONS_H_
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
+#include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -2447,9 +2451,10 @@ cat > chrome/browser/ui/webui/aerium_extensions.h <<'AERIUM_EXTENSIONS_H'
 #include "base/memory/weak_ptr.h"
 #include "base/task/thread_pool.h"
 #include "base/values.h"
+#include "build/build_config.h"
 #include "chrome/browser/extensions/extension_install_prompt.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/chrome_select_file_policy.h"
+#include "chrome/browser/ui/select_file_policy/chrome_select_file_policy.h"
 #include "content/public/browser/url_data_source.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
@@ -2457,6 +2462,7 @@ cat > chrome/browser/ui/webui/aerium_extensions.h <<'AERIUM_EXTENSIONS_H'
 #include "content/public/browser/webui_config.h"
 #include "extensions/browser/crx_installer.h"
 #include "extensions/browser/install_prompt_data.h"
+#include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
 #include "services/network/public/mojom/content_security_policy.mojom.h"
 #include "ui/shell_dialogs/select_file_dialog.h"
@@ -2644,15 +2650,25 @@ inline void AeriumExtensions::FileSelected(const ui::SelectedFileInfo& file,
               if (!out.IsValid()) {
                 return false;
               }
-              std::vector<char> buffer(64 * 1024);
-              int read = 0;
-              while ((read = in.ReadAtCurrentPos(buffer.data(),
-                                                 buffer.size())) > 0) {
-                if (out.WriteAtCurrentPos(buffer.data(), read) != read) {
+              // The span overloads, not the char*/int ones: those are
+              // annotated UNSAFE_BUFFER_USAGE and this directory is not on
+              // the exempt list in build/config/unsafe_buffers_paths.txt, so
+              // calling them here would not compile.
+              std::vector<uint8_t> buffer(64 * 1024);
+              while (true) {
+                const std::optional<size_t> read =
+                    in.ReadAtCurrentPos(base::span(buffer));
+                if (!read.has_value()) {
+                  return false;
+                }
+                if (*read == 0u) {
+                  return true;
+                }
+                if (!out.WriteAtCurrentPosAndCheck(
+                        base::span(buffer).first(*read))) {
                   return false;
                 }
               }
-              return read == 0;
             },
             path, copy),
         base::BindOnce(&AeriumExtensions::OnCopied,
