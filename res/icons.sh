@@ -5,24 +5,25 @@
 svg=$(dirname "$0")/aerium.svg
 w=$(identify -format %w "$1")
 
-# The field behind the mark.
+# No field behind the mark. The logo is the whole icon.
 #
-# This was #FFFFFF, on the reasoning that a small mark on a plain light tile
-# reads like the stock Phone, Messages and Camera icons next to it. Reported
-# against that build (android issue 13, on a 1080x2400 / 392dpi Redmi Note
-# 11S): "make it bigger and no white border, the current one is very goofy".
-# It is the right call for a glyph - a monochrome outline needs a field to sit
-# on. aerium.svg is not a glyph. It is a full-colour disc that is already its
-# own tile, so putting it on a second tile draws a border around it, and the
-# smaller the disc the more of that border there is to see.
+# This has now been three things. It was #FFFFFF, on the reasoning that a small
+# mark on a plain light tile reads like the stock Phone, Messages and Camera
+# icons beside it. android issue 13 reported that as "very goofy" and it was:
+# aerium.svg is not a glyph that needs a field, it is a full-colour disc that is
+# already its own tile, so a second tile behind it reads as a border. It then
+# became #111C42, the darkest navy of the mark itself, so that whatever the
+# launcher mask left uncovered was at least a colour the disc already touches.
 #
-# Now the darkest navy of the mark itself (#111C42, the third swirl arm), so
-# the field is never a different colour from the thing on it. On a circular
-# mask the disc covers it completely and it is not visible at all; on a
-# squircle or square mask it fills the corners the disc cannot reach, in a
-# colour those corners already touch. Either way nothing white is left to
-# read as a border.
-bg='#111C42'
+# That was still a tile. Asked for directly, against the Windows build as the
+# reference: just the logo, nothing behind it. So there is nothing behind it -
+# the background layer is fully transparent and the legacy bitmaps are drawn on
+# transparency too.
+#
+# This is what the mark is shaped for. A 512 viewBox filled edge to edge by one
+# disc has no corners to lose, so on a circular or squircle mask the result is
+# the disc and only the disc, and there is no field left to show as a rim at
+# any mask shape.
 
 # The logo is a circle that fills its whole 512 viewBox, so these percentages
 # are the circle's diameter as a share of the icon's width.
@@ -70,11 +71,12 @@ render_over() {
 
 case $(basename "$1") in
   layered_app_icon_background*)
-    # Adaptive icon background layer: one flat field, full bleed. This is
-    # what fills the launcher's mask, whatever shape that mask happens to be,
-    # so the tile is this colour edge to edge and the foreground layer only
-    # has to carry the logo.
-    convert -size ${w}x${w} xc:"$bg" "$1" ;;
+    # Adaptive icon background layer: fully transparent. The launcher masks the
+    # two layers and leaves transparency transparent - it does not substitute a
+    # plate of its own for an adaptive icon, which is the difference between
+    # this and the legacy case below - so what survives the mask is the
+    # foreground disc by itself.
+    convert -size ${w}x${w} xc:none "$1" ;;
   layered_app_icon_foreground*)
     # Adaptive icon foreground layer: the logo on transparency, because the
     # background layer above is what supplies the colour behind it.
@@ -83,12 +85,18 @@ case $(basename "$1") in
     # Everything else - layered_app_icon.png and app_icon.png - is a legacy,
     # non-adaptive icon: one square bitmap, no separate background layer.
     #
-    # These used to be drawn on transparency, which is what left four empty
-    # corners around a circular logo and let the launcher fill them with a
-    # plate of its own choosing. They get the painted field instead, so the
-    # corners are ours rather than the launcher's - and at 100% the disc
-    # inscribes the square exactly, so a circular mask lands on the disc edge
-    # and the field only shows in the corners of a square one.
-    render_over "$1" $legacy_pct "$bg" ;;
+    # Drawn on transparency, at 100%, so the disc inscribes the square exactly
+    # and the only empty pixels are the four corners it cannot reach.
+    #
+    # The honest caveat, since it is the one thing here that is not fully ours
+    # to decide: a launcher that falls back to legacy treatment wraps a
+    # non-adaptive icon in a plate of its own choosing, and a painted field was
+    # how the previous version denied it the chance. That fallback needs an app
+    # with no adaptive icon, and this one has both layers above, so the launcher
+    # uses those. Where the legacy bitmap is still read directly - the task
+    # switcher and parts of Settings on some builds - a plate can come back.
+    # Named rather than left to be discovered: if it does, this line is the one
+    # to change back, and only this line.
+    render_over "$1" $legacy_pct none ;;
 esac
 echo "aerium icon: $1 (${w}px)"

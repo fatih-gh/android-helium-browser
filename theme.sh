@@ -1411,13 +1411,17 @@ sed -i 's/^  registry->RegisterListPref(prefs::kAboutFlagsEntries);$/  \/\/ Sile
 #
 #     android:src="@mipmap/app_icon"
 #
-# which is the LAUNCHER icon. res/icons.sh generates that as a legacy,
-# non-adaptive icon: a flat white field with the mark drawn at 54% of the
-# file's width. Both of those are right for a launcher tile and the comments
-# in that script explain why - a legacy icon left transparent gets dropped onto
-# whatever plate the launcher supplies, which is not a choice we control. In
-# the widget neither holds. The whole bitmap is scaled into the icon slot, so
-# the white field fills the slot and the mark shrinks to just over half of it.
+# which is the LAUNCHER icon. When this was written res/icons.sh drew that as a
+# legacy, non-adaptive bitmap on a flat white field with the mark at 54% of the
+# file's width, and the widget inherited both: the field filled the icon slot
+# and the mark shrank to just over half of it.
+#
+# That script no longer paints a field and now draws the mark at 100%, so the
+# symptom this fixed is gone at the source. The dedicated drawable stays anyway,
+# and stays for its second reason rather than its first: a launcher icon is
+# built for a 108dp adaptive canvas with a 72dp safe zone, and a widget slot has
+# no safe zone, so pointing the widget at the launcher icon would still give up
+# a third of the box to margin the widget does not need.
 #
 # Nothing about the layout is wrong, which is worth saying because "not well
 # aligned" points at the layout: the medium bar is 50dp tall with a 28dp icon
