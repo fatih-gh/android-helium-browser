@@ -4825,6 +4825,55 @@ echo "[aerium] view page source applied"
 sed_i '/^  if (extensions::util::IsExtensionDownload(\*item) \&\&$/{N;s%  if (extensions::util::IsExtensionDownload(\*item) \&\&\n      !extensions::WebstoreInstaller::GetAssociatedApproval(\*item)) {%  // Aerium: see theme.sh. A .crx whose host serves it as application/octet-stream\n  // rather than as an extension MIME type - which is what GitHub does for every\n  // release asset - is still a .crx, and refusing to install it means the only\n  // way to get an extension that is not on a store is no way at all.\n  //\n  // Narrow on purpose. It applies only when the host is already one this build\n  // allows off-store installs from, so this changes what a trusted host is\n  // allowed to serve, not which hosts are trusted. A .crx from anywhere else\n  // saves as a file exactly as before, rather than reaching CrxInstaller and\n  // being refused with an error where a download used to appear.\n  //\n  // The install prompt is unchanged: CreateCrxInstaller() builds one and the\n  // user still has to agree to the permissions.\n  const bool aerium_offstore_crx =\n      !extensions::util::IsExtensionDownload(*item) \&\&\n      item->GetTargetFilePath().MatchesExtension(\n          extensions::kExtensionFileExtension) \&\&\n      download_crx_util::OffStoreInstallAllowedByPrefs(profile_, *item);\n\n  if ((extensions::util::IsExtensionDownload(*item) || aerium_offstore_crx) \&\&\n      !extensions::WebstoreInstaller::GetAssociatedApproval(*item)) {%}' \
     chrome/browser/download/chrome_download_manager_delegate.cc
 
+# --- ... and give that install prompt somewhere to appear.
+#
+# The block above gets a GitHub .crx as far as CrxInstaller. It still does not
+# install, and issue 14 is the report: the file downloads and nothing happens.
+# The missing half is upstream's, in download_crx_util.cc:
+#
+#   content::WebContents* web_contents = DownloadItemUtils::GetWebContents(...);
+#   if (!web_contents) {
+#     BrowserWindowInterface* browser = GetLastActiveBrowserWithProfile(...);
+#     if (!browser) {
+#   #if BUILDFLAG(IS_ANDROID)
+#       // TODO(crbug.com/474161414): Implement fallback if no browser is found.
+#       // Android does not have Browser implementation yet, but we are okay
+#       // with not showing an installed dialog if no window is open.
+#       return nullptr;
+#
+# So when the download has no live WebContents, Android has no second route to
+# one - there is no Browser to ask - and CreateExtensionInstallPrompt returns
+# nullptr. CrxInstaller is then handed no client, and the install that the block
+# above worked to reach has no way to ask the user anything. On desktop the same
+# branch creates a Browser and carries on.
+#
+# A download losing its WebContents is ordinary rather than exceptional: the
+# association is to the tab that started it, and by the time ShouldOpenDownload
+# runs at completion that tab may have navigated, been closed, or handed the
+# transfer to Android's download manager.
+#
+# The fallback upstream leaves as a TODO is the obvious one, and Android has the
+# pieces for it: TabModelList::models() is the list of open tab models,
+# TabModel::GetProfile() says which profile each belongs to, and
+# GetActiveWebContents() is the foreground tab. Take the first model matching
+# this profile that has one.
+#
+# Deliberately placed BEFORE the browser lookup rather than replacing the
+# nullptr return, so the desktop path is untouched and this only ever runs where
+# upstream would already have given up. It cannot regress anything: the whole
+# block is inside `if (!web_contents)`, so a download that still has its own
+# WebContents keeps using it, exactly as now.
+#
+# The dialog itself is not the gap. ExtensionInstallPrompt::
+# GetDefaultShowDialogCallback() is defined in the views implementation, and
+# this build links, so views is compiled here and the prompt has somewhere to
+# draw once it is given a WebContents.
+sed_i 's|^#if !BUILDFLAG(IS_ANDROID)$|#if BUILDFLAG(IS_ANDROID)\n// Aerium: see theme.sh - used to find a WebContents for the extension install\n// prompt when the download no longer has one of its own.\n#include "chrome/browser/ui/android/tab_model/tab_model.h"\n#include "chrome/browser/ui/android/tab_model/tab_model_list.h"\n#endif\n&|' \
+    chrome/browser/download/download_crx_util.cc
+
+sed_i 's|^  if (!web_contents) {$|#if BUILDFLAG(IS_ANDROID)\n  // Aerium: see theme.sh. Upstream returns nullptr here on Android because it\n  // has no Browser to fall back to, which leaves CrxInstaller with no client\n  // and no way to prompt - a .crx then downloads and nothing happens. The\n  // foreground tab is a perfectly good place to show the dialog, so use it.\n  if (!web_contents) {\n    for (TabModel* model : TabModelList::models()) {\n      if (model \&\& model->GetProfile() == profile) {\n        web_contents = model->GetActiveWebContents();\n        if (web_contents) {\n          break;\n        }\n      }\n    }\n  }\n#endif  // BUILDFLAG(IS_ANDROID)\n&|' \
+    chrome/browser/download/download_crx_util.cc
+
 
 # --- The source URL of a download, shown and copyable.
 #
