@@ -6394,6 +6394,7 @@ import android.net.Uri;
 import android.provider.Browser;
 import android.text.TextUtils;
 import android.util.AttributeSet;
+import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.EditText;
@@ -6471,6 +6472,7 @@ public class AeriumSpeedDial extends LinearLayout {
         // new tab page would otherwise keep the old grid until the tab was closed. Rebuilding on
         // attach is what makes a change in Settings show up on the way back.
         mEditing = false;
+        AeriumNtpBackground.refresh();
         rebuild();
     }
 
@@ -6490,7 +6492,9 @@ public class AeriumSpeedDial extends LinearLayout {
         int n =
                 ChromeSharedPreferences.getInstance()
                         .readInt(ChromePreferenceKeys.AERIUM_SPEED_DIAL_COLUMNS, 4);
-        return n == 3 ? 3 : 4;
+        if (n < 3) return 3;
+        if (n > 5) return 5;
+        return n;
     }
 
     private static int maxTiles() {
@@ -6574,9 +6578,38 @@ public class AeriumSpeedDial extends LinearLayout {
         }
         addView(grid);
 
-        if (showShortcutRow()) {
+        if (mEditing) {
+            addView(buildDoneRow());
+        } else if (showShortcutRow()) {
             addView(buildShortcutRow());
         }
+    }
+
+    /**
+     * Aerium: the one pill that leaves edit mode.
+     *
+     * <p>It exists because tapping a tile now opens it for editing rather than closing the mode,
+     * and a mode with no visible way out is a trap. It takes the shortcut row's place so the page
+     * does not change height when editing starts.
+     */
+    private View buildDoneRow() {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(HORIZONTAL);
+        LinearLayout.LayoutParams rowParams =
+                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+        rowParams.topMargin = dp(6);
+        row.setLayoutParams(rowParams);
+
+        TextView done = buildPill(getResources().getString(R.string.aerium_speed_dial_done), 0);
+        done.setOnClickListener(
+                new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        setEditing(false);
+                    }
+                });
+        row.addView(done);
+        return row;
     }
 
     /**
@@ -6606,8 +6639,20 @@ public class AeriumSpeedDial extends LinearLayout {
     }
 
     private View buildShortcut(int labelRes, final String url, int startMargin) {
+        TextView pill = buildPill(getResources().getString(labelRes), startMargin);
+        pill.setOnClickListener(
+                new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        openInternal(url);
+                    }
+                });
+        return pill;
+    }
+
+    private TextView buildPill(CharSequence label, int startMargin) {
         TextView pill = new TextView(getContext());
-        pill.setText(labelRes);
+        pill.setText(label);
         pill.setTextColor(0xFFD8E6F5);
         pill.setTextSize(12);
         pill.setGravity(Gravity.CENTER);
@@ -6621,14 +6666,6 @@ public class AeriumSpeedDial extends LinearLayout {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(44), 1f);
         params.leftMargin = startMargin;
         pill.setLayoutParams(params);
-
-        pill.setOnClickListener(
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        openInternal(url);
-                    }
-                });
         return pill;
     }
 
@@ -6745,21 +6782,59 @@ public class AeriumSpeedDial extends LinearLayout {
                     @Override
                     public void onClick(View v) {
                         if (mEditing) {
-                            setEditing(false);
+                            showTileDialog(index, entry);
                             return;
                         }
                         open(entry.url);
                     }
                 });
+        // A long press enters edit mode; a second one, already editing, picks the tile up.
+        // Reordering is a drag rather than a pair of arrows because the grid is the only place
+        // the order is visible, and dragging is what the same tiles do on the desktop page.
         cell.setOnLongClickListener(
                 new OnLongClickListener() {
                     @Override
                     public boolean onLongClick(View v) {
-                        setEditing(!mEditing);
+                        if (!mEditing) {
+                            setEditing(true);
+                            return true;
+                        }
+                        v.startDragAndDrop(
+                                null, new View.DragShadowBuilder(v), Integer.valueOf(index), 0);
+                        return true;
+                    }
+                });
+        cell.setOnDragListener(
+                new OnDragListener() {
+                    @Override
+                    public boolean onDrag(View v, DragEvent event) {
+                        if (event.getAction() != DragEvent.ACTION_DROP) return true;
+                        Object from = event.getLocalState();
+                        if (!(from instanceof Integer)) return false;
+                        move(((Integer) from).intValue(), index);
                         return true;
                     }
                 });
         return cell;
+    }
+
+    /** Puts one shortcut where another was, and redraws once the drop has finished. */
+    private void move(int from, int to) {
+        if (from == to) return;
+        List<Entry> entries = readEntries();
+        if (from < 0 || from >= entries.size()) return;
+        if (to < 0 || to >= entries.size()) return;
+        entries.add(to, entries.remove(from));
+        writeEntries(entries);
+        // Posted rather than immediate: this runs inside the drag callback, and pulling the
+        // dragged view out from under the framework mid-drop is how that becomes a crash.
+        post(
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        rebuild();
+                    }
+                });
     }
 
     private View buildAddTile() {
@@ -6780,7 +6855,7 @@ public class AeriumSpeedDial extends LinearLayout {
                 new OnClickListener() {
                     @Override
                     public void onClick(View v) {
-                        showAddDialog();
+                        showTileDialog(-1, null);
                     }
                 });
         return cell;
@@ -6850,7 +6925,11 @@ public class AeriumSpeedDial extends LinearLayout {
         }
     }
 
-    private void showAddDialog() {
+    /**
+     * Aerium: adds a shortcut, or edits the one at {@code index} when it is not negative. One
+     * dialog for both because they differ in a title, a button label and two prefilled fields.
+     */
+    private void showTileDialog(final int index, final Entry existing) {
         final Context context = getContext();
         LinearLayout body = new LinearLayout(context);
         body.setOrientation(VERTICAL);
@@ -6865,24 +6944,39 @@ public class AeriumSpeedDial extends LinearLayout {
         urlField.setHint(R.string.aerium_speed_dial_address);
         urlField.setSingleLine(true);
 
+        if (existing != null) {
+            nameField.setText(existing.title);
+            urlField.setText(existing.url);
+        }
+
         body.addView(nameField);
         body.addView(urlField);
 
         new AlertDialog.Builder(context)
-                .setTitle(R.string.aerium_speed_dial_add_title)
+                .setTitle(
+                        existing == null
+                                ? R.string.aerium_speed_dial_add_title
+                                : R.string.aerium_speed_dial_edit_title)
                 .setView(body)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(
-                        R.string.aerium_speed_dial_add_confirm,
+                        existing == null
+                                ? R.string.aerium_speed_dial_add_confirm
+                                : R.string.aerium_speed_dial_save,
                         new android.content.DialogInterface.OnClickListener() {
                             @Override
                             public void onClick(
                                     android.content.DialogInterface dialog, int which) {
                                 String url = normalizeUrl(urlField.getText().toString());
                                 if (TextUtils.isEmpty(url)) return;
+                                String title = nameField.getText().toString().trim();
                                 List<Entry> entries = readEntries();
-                                if (entries.size() >= maxTiles()) return;
-                                entries.add(new Entry(nameField.getText().toString().trim(), url));
+                                if (index >= 0 && index < entries.size()) {
+                                    entries.set(index, new Entry(title, url));
+                                } else {
+                                    if (entries.size() >= maxTiles()) return;
+                                    entries.add(new Entry(title, url));
+                                }
                                 writeEntries(entries);
                                 rebuild();
                             }
@@ -6917,8 +7011,187 @@ sed_i 's|        android:layout="@layout/mv_tiles_layout" />|&\n\n    <!-- Aeriu
 sed_i 's|        mvTilesContainerLayout.setVisibility(View.VISIBLE);|        // Aerium: the speed dial replaces these tiles - see theme.sh. Hidden\n        // rather than skipped so the coordinator still finds its views.\n        mvTilesContainerLayout.setVisibility(\n                AeriumSpeedDial.isEnabled() ? View.GONE : View.VISIBLE);|' \
     chrome/android/java/src/org/chromium/chrome/browser/ntp/NewTabPageLayout.java
 
-sed_i 's|      <message name="IDS_MENU_DEV_TOOLS" desc=|      <message name="IDS_AERIUM_SPEED_DIAL_ADD" desc="Label under the empty tile that adds a new new-tab-page shortcut.">\n        Add\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_ADD_TITLE" desc="Title of the dialog that adds a new-tab-page shortcut.">\n        Add a shortcut\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_ADD_CONFIRM" desc="Button that confirms adding the shortcut.">\n        Add\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_NAME" desc="Hint in the shortcut name field.">\n        Name\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_ADDRESS" desc="Hint in the shortcut address field.">\n        Address\n      </message>\n&|' \
+sed_i 's|      <message name="IDS_MENU_DEV_TOOLS" desc=|      <message name="IDS_AERIUM_SPEED_DIAL_ADD" desc="Label under the empty tile that adds a new new-tab-page shortcut.">\n        Add\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_ADD_TITLE" desc="Title of the dialog that adds a new-tab-page shortcut.">\n        Add a shortcut\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_ADD_CONFIRM" desc="Button that confirms adding the shortcut.">\n        Add\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_EDIT_TITLE" desc="Title of the dialog that edits a new-tab-page shortcut.">\n        Edit shortcut\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_SAVE" desc="Button that saves an edited shortcut.">\n        Save\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_DONE" desc="Button that leaves the new tab page shortcut edit mode.">\n        Done\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_NAME" desc="Hint in the shortcut name field.">\n        Name\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_ADDRESS" desc="Hint in the shortcut address field.">\n        Address\n      </message>\n&|' \
     chrome/browser/ui/android/strings/android_chrome_strings.grd
+
+# --- The new tab page background.
+#
+# Pure black, Aerium navy, or one of four bundled gradient sets, matching what
+# chrome://aerium-newtab offers on the desktop down to the colour stops. Drawn
+# rather than photographic: shipping photographs means shipping image files in
+# the APK, and none are in the tree. Each set is four deep so the choice behaves
+# the way a photo set would once real images land, and swapping the tables here
+# for bitmaps is the only change that will take.
+#
+# Two hooks in NewTabPage.java and nothing else. The colour goes through
+# getBackgroundColor(), which is what the native page host paints behind the
+# page and what the toolbar blends into; the gradient goes on the feed surface's
+# own root view, which is the only view in the stack that fills the screen -
+# NewTabPageLayout is wrap_content inside a scroller, so a background there
+# would stop where the content does.
+cat > chrome/android/java/src/org/chromium/chrome/browser/ntp/AeriumNtpBackground.java <<'AERIUM_NTP_BACKGROUND_JAVA'
+// Copyright 2026 The Aerium Authors
+// Aerium: generated by theme.sh. See that script for why this exists.
+
+package org.chromium.chrome.browser.ntp;
+
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.text.TextUtils;
+import android.view.View;
+
+import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+
+import java.lang.ref.WeakReference;
+
+/**
+ * Aerium: the new tab page background.
+ *
+ * <p>Deliberately self-contained, like AeriumSpeedDial beside it: two shared preferences in, a
+ * colour and a drawable out, and no reach into the feed or suggestions stacks. The tables below
+ * are the same colour stops the desktop new tab page uses, so the two platforms land on the same
+ * backgrounds.
+ */
+public final class AeriumNtpBackground {
+    /** Stored values, matching the desktop page's own. */
+    public static final String THEME = "theme";
+
+    public static final String BLACK = "black";
+    public static final String NAVY = "navy";
+    public static final String PHOTO = "photo";
+
+    /** Aerium navy, the same one res/aerium.svg and the settings palette use. */
+    private static final int NAVY_COLOR = 0xFF0E1834;
+
+    // Four variants a set, each a top, middle and bottom stop lifted from the desktop page's
+    // CSS. Three stops rather than the four or five the CSS carries: GradientDrawable spaces
+    // its colours evenly, so a fourth would land in the wrong place rather than add detail.
+    private static final int[][] DUSK = {
+        {0xFF1A2D4D, 0xFF6A5570, 0xFF14121C},
+        {0xFF221A2E, 0xFF9C6A5C, 0xFF171320},
+        {0xFF10203A, 0xFF7B6A78, 0xFF1A1622},
+        {0xFF141D38, 0xFF8D6F72, 0xFF12111C},
+    };
+    private static final int[][] DEEP = {
+        {0xFF03060F, 0xFF16304F, 0xFF050A14},
+        {0xFF040A16, 0xFF0E1F3A, 0xFF071022},
+        {0xFF060D1C, 0xFF1D3C60, 0xFF060C18},
+        {0xFF02060E, 0xFF0A1729, 0xFF040810},
+    };
+    private static final int[][] STONE = {
+        {0xFF1B1B1E, 0xFF55555F, 0xFF141416},
+        {0xFF17171A, 0xFF2C2C33, 0xFF111113},
+        {0xFF141417, 0xFF46464F, 0xFF101012},
+        {0xFF131316, 0xFF26262C, 0xFF0E0E10},
+    };
+    private static final int[][] MOSS = {
+        {0xFF0B1A16, 0xFF2F5A44, 0xFF08120F},
+        {0xFF091613, 0xFF153027, 0xFF070F0D},
+        {0xFF0A1714, 0xFF376A4F, 0xFF081210},
+        {0xFF08130F, 0xFF122B22, 0xFF060D0B},
+    };
+
+    // The page whose background this is. Weak because a new tab page outlives nothing and this
+    // reference must not be the thing that keeps one alive.
+    private static WeakReference<View> sRoot = new WeakReference<View>(null);
+
+    // Which of the four the current page drew. Chosen once a page, in baseColor(), so the
+    // colour the toolbar blends into is the colour that actually got painted.
+    private static int sVariant = -1;
+
+    private AeriumNtpBackground() {}
+
+    private static String background() {
+        String value =
+                ChromeSharedPreferences.getInstance()
+                        .readString(ChromePreferenceKeys.AERIUM_NTP_BACKGROUND, THEME);
+        return TextUtils.isEmpty(value) ? THEME : value;
+    }
+
+    private static int[][] set() {
+        String value =
+                ChromeSharedPreferences.getInstance()
+                        .readString(ChromePreferenceKeys.AERIUM_NTP_BACKGROUND_SET, "dusk");
+        if ("deep".equals(value)) return DEEP;
+        if ("stone".equals(value)) return STONE;
+        if ("moss".equals(value)) return MOSS;
+        return DUSK;
+    }
+
+    private static int variant() {
+        if (sVariant < 0 || sVariant > 3) sVariant = (int) (Math.random() * 4.0) & 3;
+        return sVariant;
+    }
+
+    /**
+     * The colour behind the page, for NewTabPage.getBackgroundColor(). Falls back to whatever
+     * the theme asked for, which is what an untouched install still gets.
+     */
+    public static int baseColor(int fallback) {
+        String bg = background();
+        if (BLACK.equals(bg)) return Color.BLACK;
+        if (NAVY.equals(bg)) return NAVY_COLOR;
+        if (PHOTO.equals(bg)) {
+            sVariant = -1;
+            return set()[variant()][0];
+        }
+        return fallback;
+    }
+
+    /** Paints the chosen background on the page's root view and remembers it for refresh(). */
+    public static void apply(View root) {
+        if (root == null) return;
+        sRoot = new WeakReference<View>(root);
+        paint(root);
+    }
+
+    /**
+     * Repaints the page this last applied to. AeriumSpeedDial calls it when the new tab page
+     * comes back, which is what makes a change on the settings screen show without a restart.
+     */
+    public static void refresh() {
+        View root = sRoot.get();
+        if (root != null) paint(root);
+    }
+
+    private static void paint(View root) {
+        String bg = background();
+        if (PHOTO.equals(bg)) {
+            int[] stops = set()[variant()];
+            GradientDrawable gradient =
+                    new GradientDrawable(
+                            GradientDrawable.Orientation.TOP_BOTTOM,
+                            new int[] {stops[0], stops[1], stops[2]});
+            gradient.setGradientType(GradientDrawable.LINEAR_GRADIENT);
+            root.setBackground(gradient);
+        } else if (NAVY.equals(bg)) {
+            root.setBackgroundColor(NAVY_COLOR);
+        } else if (BLACK.equals(bg)) {
+            root.setBackgroundColor(Color.BLACK);
+        } else {
+            // Back to the theme: clearing the drawable lets the host's own colour, which
+            // getBackgroundColor() has already put back, show through.
+            root.setBackground(null);
+        }
+    }
+}
+AERIUM_NTP_BACKGROUND_JAVA
+
+sed_i 's|^  "java/src/org/chromium/chrome/browser/ntp/NewTabPageLayout.java",$|  "java/src/org/chromium/chrome/browser/ntp/AeriumNtpBackground.java",\n&|' \
+    chrome/android/chrome_java_sources.gni
+
+# Same package, so no import on either side.
+sed_i 's|        mBackgroundColor = ChromeSemanticColorUtils.getHomeSurfaceBackgroundColor(activity);|        // Aerium: the chosen new tab page background, falling back to the theme. See theme.sh.\n        mBackgroundColor =\n                AeriumNtpBackground.baseColor(\n                        ChromeSemanticColorUtils.getHomeSurfaceBackgroundColor(activity));|' \
+    chrome/android/java/src/org/chromium/chrome/browser/ntp/NewTabPage.java
+
+sed_i 's|        startupMetricsTracker.registerNtpViewObserver(mFeedSurfaceProvider.getView());|&\n        // Aerium: paint the background behind the whole page. See theme.sh.\n        AeriumNtpBackground.apply(mFeedSurfaceProvider.getView());|' \
+    chrome/android/java/src/org/chromium/chrome/browser/ntp/NewTabPage.java
+
+sed_i 's|    public static final String AERIUM_SPEED_DIAL_ROWS = "Chrome.Aerium.SpeedDialRows";|&\n\n    /** The new tab page background: "theme", "black", "navy" or "photo". */\n    public static final String AERIUM_NTP_BACKGROUND = "Chrome.Aerium.NtpBackground";\n\n    /** Which bundled gradient set the "photo" background draws from. */\n    public static final String AERIUM_NTP_BACKGROUND_SET = "Chrome.Aerium.NtpBackgroundSet";|' \
+    $CPK
+sed_i 's|^                AERIUM_SPEED_DIAL_TILES,$|&\n                AERIUM_NTP_BACKGROUND,\n                AERIUM_NTP_BACKGROUND_SET,|' \
+    $CPK
 
 echo "[aerium] speed dial applied"
 
@@ -6943,11 +7216,22 @@ cat > chrome/android/java/res/xml/aerium_ntp_preferences.xml <<'AERIUM_NTP_XML'
         android:persistent="false"
         android:title="@string/aerium_ntp_speed_dial_title"
         android:summary="@string/aerium_ntp_speed_dial_summary" />
-    <org.chromium.components.browser_ui.settings.ChromeSwitchPreference
-        android:key="aerium_speed_dial_three"
+    <Preference
+        android:key="aerium_ntp_background"
         android:persistent="false"
-        android:title="@string/aerium_ntp_three_title"
-        android:summary="@string/aerium_ntp_three_summary" />
+        android:title="@string/aerium_ntp_background_title" />
+    <Preference
+        android:key="aerium_ntp_background_set"
+        android:persistent="false"
+        android:title="@string/aerium_ntp_background_set_title" />
+    <Preference
+        android:key="aerium_ntp_columns"
+        android:persistent="false"
+        android:title="@string/aerium_ntp_columns_title" />
+    <Preference
+        android:key="aerium_ntp_rows"
+        android:persistent="false"
+        android:title="@string/aerium_ntp_rows_title" />
     <org.chromium.components.browser_ui.settings.ChromeSwitchPreference
         android:key="aerium_speed_dial_shortcuts"
         android:persistent="false"
@@ -6971,7 +7255,11 @@ cat > chrome/android/java/src/org/chromium/chrome/browser/settings/AeriumNewTabP
 
 package org.chromium.chrome.browser.settings;
 
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.DialogInterface;
 import android.os.Bundle;
+import android.text.TextUtils;
 
 import androidx.preference.Preference;
 
@@ -7000,9 +7288,16 @@ import org.chromium.components.browser_ui.settings.SettingsUtils;
 public class AeriumNewTabPageFragment extends ChromeBaseSettingsFragment {
     // Must match the keys in aerium_ntp_preferences.xml.
     private static final String PREF_SPEED_DIAL = "aerium_speed_dial";
-    private static final String PREF_THREE_PER_ROW = "aerium_speed_dial_three";
+    private static final String PREF_BACKGROUND = "aerium_ntp_background";
+    private static final String PREF_BACKGROUND_SET = "aerium_ntp_background_set";
+    private static final String PREF_COLUMNS = "aerium_ntp_columns";
+    private static final String PREF_ROWS = "aerium_ntp_rows";
     private static final String PREF_SHORTCUT_ROW = "aerium_speed_dial_shortcuts";
     private static final String PREF_CLEAR = "aerium_speed_dial_clear";
+
+    // Must match AeriumNtpBackground, which reads the same two keys.
+    private static final String[] BACKGROUNDS = {"theme", "black", "navy", "photo"};
+    private static final String[] SETS = {"dusk", "deep", "stone", "moss"};
 
     private final SettableMonotonicObservableSupplier<String> mPageTitle =
             ObservableSuppliers.createMonotonic();
@@ -7014,9 +7309,15 @@ public class AeriumNewTabPageFragment extends ChromeBaseSettingsFragment {
 
         bindSwitch(PREF_SPEED_DIAL, ChromePreferenceKeys.AERIUM_SPEED_DIAL, true);
         bindSwitch(PREF_SHORTCUT_ROW, ChromePreferenceKeys.AERIUM_SPEED_DIAL_SHORTCUTS, true);
-        bindColumns();
+        bindBackground();
+        bindCount(PREF_COLUMNS, ChromePreferenceKeys.AERIUM_SPEED_DIAL_COLUMNS, 4, COLUMN_CHOICES);
+        bindCount(PREF_ROWS, ChromePreferenceKeys.AERIUM_SPEED_DIAL_ROWS, 4, ROW_CHOICES);
         bindClear();
+        updateSetVisibility();
     }
+
+    private static final int[] COLUMN_CHOICES = {3, 4, 5};
+    private static final int[] ROW_CHOICES = {2, 3, 4, 5, 6};
 
     private void bindSwitch(String prefKey, String sharedPrefKey, boolean defaultValue) {
         ChromeSwitchPreference pref = (ChromeSwitchPreference) findPreference(prefKey);
@@ -7031,26 +7332,127 @@ public class AeriumNewTabPageFragment extends ChromeBaseSettingsFragment {
                 });
     }
 
+    private void bindBackground() {
+        bindChoice(
+                PREF_BACKGROUND,
+                ChromePreferenceKeys.AERIUM_NTP_BACKGROUND,
+                BACKGROUNDS[0],
+                BACKGROUNDS,
+                new String[] {
+                    getString(R.string.aerium_ntp_background_theme),
+                    getString(R.string.aerium_ntp_background_black),
+                    getString(R.string.aerium_ntp_background_navy),
+                    getString(R.string.aerium_ntp_background_photo),
+                });
+        bindChoice(
+                PREF_BACKGROUND_SET,
+                ChromePreferenceKeys.AERIUM_NTP_BACKGROUND_SET,
+                SETS[0],
+                SETS,
+                new String[] {
+                    getString(R.string.aerium_ntp_set_dusk),
+                    getString(R.string.aerium_ntp_set_deep),
+                    getString(R.string.aerium_ntp_set_stone),
+                    getString(R.string.aerium_ntp_set_moss),
+                });
+    }
+
     /**
-     * A switch rather than a list, because the choice is between three and four and a two-value
-     * list is a switch wearing a hat. The key stores the column count itself so the drawing code
-     * reads a number rather than inverting a boolean.
+     * A plain row that opens a single-choice dialog, rather than a ListPreference. The values
+     * live in ChromeSharedPreferences, not the preference framework's own store, so a
+     * ListPreference would need its persistence turned off and its value pushed in by hand -
+     * which is this method with more moving parts.
      */
-    private void bindColumns() {
-        ChromeSwitchPreference pref = (ChromeSwitchPreference) findPreference(PREF_THREE_PER_ROW);
+    private void bindChoice(
+            String prefKey,
+            final String sharedPrefKey,
+            final String defaultValue,
+            final String[] values,
+            final String[] labels) {
+        final Preference pref = findPreference(prefKey);
         if (pref == null) return;
-        pref.setChecked(
-                ChromeSharedPreferences.getInstance()
-                                .readInt(ChromePreferenceKeys.AERIUM_SPEED_DIAL_COLUMNS, 4)
-                        == 3);
-        pref.setOnPreferenceChangeListener(
-                (preference, newValue) -> {
-                    ChromeSharedPreferences.getInstance()
-                            .writeInt(
-                                    ChromePreferenceKeys.AERIUM_SPEED_DIAL_COLUMNS,
-                                    ((boolean) newValue) ? 3 : 4);
+        pref.setSummary(labels[indexOf(values, read(sharedPrefKey, defaultValue))]);
+        pref.setOnPreferenceClickListener(
+                preference -> {
+                    Context context = getContext();
+                    if (context == null) return true;
+                    new AlertDialog.Builder(context)
+                            .setTitle(pref.getTitle())
+                            .setSingleChoiceItems(
+                                    labels,
+                                    indexOf(values, read(sharedPrefKey, defaultValue)),
+                                    (DialogInterface dialog, int which) -> {
+                                        ChromeSharedPreferences.getInstance()
+                                                .writeString(sharedPrefKey, values[which]);
+                                        pref.setSummary(labels[which]);
+                                        dialog.dismiss();
+                                        updateSetVisibility();
+                                    })
+                            .setNegativeButton(android.R.string.cancel, null)
+                            .show();
                     return true;
                 });
+    }
+
+    /** The same, for the two counts, whose labels are the numbers themselves. */
+    private void bindCount(
+            String prefKey, final String sharedPrefKey, final int defaultValue, final int[] values) {
+        final Preference pref = findPreference(prefKey);
+        if (pref == null) return;
+        final String[] labels = new String[values.length];
+        for (int i = 0; i < values.length; i++) labels[i] = Integer.toString(values[i]);
+        pref.setSummary(labels[indexOf(values, readInt(sharedPrefKey, defaultValue))]);
+        pref.setOnPreferenceClickListener(
+                preference -> {
+                    Context context = getContext();
+                    if (context == null) return true;
+                    new AlertDialog.Builder(context)
+                            .setTitle(pref.getTitle())
+                            .setSingleChoiceItems(
+                                    labels,
+                                    indexOf(values, readInt(sharedPrefKey, defaultValue)),
+                                    (DialogInterface dialog, int which) -> {
+                                        ChromeSharedPreferences.getInstance()
+                                                .writeInt(sharedPrefKey, values[which]);
+                                        pref.setSummary(labels[which]);
+                                        dialog.dismiss();
+                                    })
+                            .setNegativeButton(android.R.string.cancel, null)
+                            .show();
+                    return true;
+                });
+    }
+
+    /** The gradient set only means anything while the bundled gradient is the background. */
+    private void updateSetVisibility() {
+        Preference pref = findPreference(PREF_BACKGROUND_SET);
+        if (pref == null) return;
+        pref.setVisible(
+                "photo".equals(read(ChromePreferenceKeys.AERIUM_NTP_BACKGROUND, BACKGROUNDS[0])));
+    }
+
+    private static String read(String key, String defaultValue) {
+        String value = ChromeSharedPreferences.getInstance().readString(key, defaultValue);
+        return TextUtils.isEmpty(value) ? defaultValue : value;
+    }
+
+    private static int readInt(String key, int defaultValue) {
+        return ChromeSharedPreferences.getInstance().readInt(key, defaultValue);
+    }
+
+    /** Zero for anything unrecognised, so a hand-edited value reads as the first choice. */
+    private static int indexOf(String[] values, String value) {
+        for (int i = 0; i < values.length; i++) {
+            if (values[i].equals(value)) return i;
+        }
+        return 0;
+    }
+
+    private static int indexOf(int[] values, int value) {
+        for (int i = 0; i < values.length; i++) {
+            if (values[i] == value) return i;
+        }
+        return 0;
     }
 
     private void bindClear() {
@@ -7091,7 +7493,7 @@ sed_i 's|^import org.chromium.chrome.browser.settings.AeriumMediaFragment;$|&\ni
 sed_i 's|^                    AeriumMediaFragment.SEARCH_INDEX_DATA_PROVIDER,$|&\n                    AeriumNewTabPageFragment.SEARCH_INDEX_DATA_PROVIDER,|' \
     $SIPR
 
-sed_i 's|      <message name="IDS_AERIUM_SPEED_DIAL_ADD" desc=|      <message name="IDS_AERIUM_SPEED_DIAL_BOOKMARKS" desc="Label on the new tab page button that opens bookmarks.">\n        Bookmarks\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_HISTORY" desc="Label on the new tab page button that opens history.">\n        History\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_DOWNLOADS" desc="Label on the new tab page button that opens downloads.">\n        Downloads\n      </message>\n      <message name="IDS_AERIUM_NTP_TITLE" desc="Title of the New tab page settings screen.">\n        New tab page\n      </message>\n      <message name="IDS_AERIUM_NTP_SPEED_DIAL_TITLE" desc="Title of the switch that shows the speed dial instead of the most visited tiles.">\n        Show shortcuts\n      </message>\n      <message name="IDS_AERIUM_NTP_SPEED_DIAL_SUMMARY" desc="Summary under that switch.">\n        A grid you arrange yourself, in place of the sites Aerium guesses from your history.\n      </message>\n      <message name="IDS_AERIUM_NTP_THREE_TITLE" desc="Title of the switch that puts three shortcuts on a row instead of four.">\n        Three shortcuts per row\n      </message>\n      <message name="IDS_AERIUM_NTP_THREE_SUMMARY" desc="Summary under that switch.">\n        Fewer, larger shortcuts. Off puts four on a row.\n      </message>\n      <message name="IDS_AERIUM_NTP_SHORTCUT_ROW_TITLE" desc="Title of the switch that shows the bookmarks, history and downloads row.">\n        Bookmarks, history and downloads\n      </message>\n      <message name="IDS_AERIUM_NTP_SHORTCUT_ROW_SUMMARY" desc="Summary under that switch.">\n        A row of three buttons under the shortcuts.\n      </message>\n      <message name="IDS_AERIUM_NTP_CLEAR_TITLE" desc="Title of the entry that removes every shortcut.">\n        Clear all shortcuts\n      </message>\n      <message name="IDS_AERIUM_NTP_CLEAR_SUMMARY" desc="Summary under that entry.">\n        Empties the grid. The sites themselves are not touched.\n      </message>\n&|' \
+sed_i 's|      <message name="IDS_AERIUM_SPEED_DIAL_ADD" desc=|      <message name="IDS_AERIUM_SPEED_DIAL_BOOKMARKS" desc="Label on the new tab page button that opens bookmarks.">\n        Bookmarks\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_HISTORY" desc="Label on the new tab page button that opens history.">\n        History\n      </message>\n      <message name="IDS_AERIUM_SPEED_DIAL_DOWNLOADS" desc="Label on the new tab page button that opens downloads.">\n        Downloads\n      </message>\n      <message name="IDS_AERIUM_NTP_TITLE" desc="Title of the New tab page settings screen.">\n        New tab page\n      </message>\n      <message name="IDS_AERIUM_NTP_SPEED_DIAL_TITLE" desc="Title of the switch that shows the speed dial instead of the most visited tiles.">\n        Show shortcuts\n      </message>\n      <message name="IDS_AERIUM_NTP_SPEED_DIAL_SUMMARY" desc="Summary under that switch.">\n        A grid you arrange yourself, in place of the sites Aerium guesses from your history.\n      </message>\n      <message name="IDS_AERIUM_NTP_BACKGROUND_TITLE" desc="Title of the new tab page background chooser.">\n        Background\n      </message>\n      <message name="IDS_AERIUM_NTP_BACKGROUND_THEME" desc="Background choice that leaves the theme colour alone.">\n        Follow the theme\n      </message>\n      <message name="IDS_AERIUM_NTP_BACKGROUND_BLACK" desc="Background choice: black.">\n        Pure black\n      </message>\n      <message name="IDS_AERIUM_NTP_BACKGROUND_NAVY" desc="Background choice: the Aerium navy.">\n        Aerium navy\n      </message>\n      <message name="IDS_AERIUM_NTP_BACKGROUND_PHOTO" desc="Background choice: one of the gradients that ship with the browser.">\n        Bundled gradient\n      </message>\n      <message name="IDS_AERIUM_NTP_BACKGROUND_SET_TITLE" desc="Title of the chooser for which set of bundled gradients to draw from.">\n        Gradient set\n      </message>\n      <message name="IDS_AERIUM_NTP_SET_DUSK" desc="Name of a set of bundled gradients.">\n        Dusk\n      </message>\n      <message name="IDS_AERIUM_NTP_SET_DEEP" desc="Name of a set of bundled gradients.">\n        Deep water\n      </message>\n      <message name="IDS_AERIUM_NTP_SET_STONE" desc="Name of a set of bundled gradients.">\n        Stone\n      </message>\n      <message name="IDS_AERIUM_NTP_SET_MOSS" desc="Name of a set of bundled gradients.">\n        Moss\n      </message>\n      <message name="IDS_AERIUM_NTP_COLUMNS_TITLE" desc="Title of the chooser for how many shortcuts sit on a row.">\n        Shortcuts per row\n      </message>\n      <message name="IDS_AERIUM_NTP_ROWS_TITLE" desc="Title of the chooser for how many rows of shortcuts the grid holds.">\n        Rows of shortcuts\n      </message>\n      <message name="IDS_AERIUM_NTP_SHORTCUT_ROW_TITLE" desc="Title of the switch that shows the bookmarks, history and downloads row.">\n        Bookmarks, history and downloads\n      </message>\n      <message name="IDS_AERIUM_NTP_SHORTCUT_ROW_SUMMARY" desc="Summary under that switch.">\n        A row of three buttons under the shortcuts.\n      </message>\n      <message name="IDS_AERIUM_NTP_CLEAR_TITLE" desc="Title of the entry that removes every shortcut.">\n        Clear all shortcuts\n      </message>\n      <message name="IDS_AERIUM_NTP_CLEAR_SUMMARY" desc="Summary under that entry.">\n        Empties the grid. The sites themselves are not touched.\n      </message>\n&|' \
     chrome/browser/ui/android/strings/android_chrome_strings.grd
 
 sed_i 's|    public static final String AERIUM_SPEED_DIAL_ROWS = "Chrome.Aerium.SpeedDialRows";|&\n\n    /** Whether the bookmarks, history and downloads row sits under the speed dial. */\n    public static final String AERIUM_SPEED_DIAL_SHORTCUTS = "Chrome.Aerium.SpeedDialShortcuts";|' \
