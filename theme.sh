@@ -5342,7 +5342,26 @@ echo "[aerium] external download manager applied"
 #
 # Default on, with a switch, because that is the layout people asked for and
 # the ones who dislike a bottom bar should not have to find chrome://flags to
-# get rid of it. Note the first restart after toggling may not pick the params
+# get rid of it.
+#
+# The switch beats the flag, deliberately. base/feature_list.cc registers
+# command-line overrides with try_emplace and documents the consequence -
+# "only the first override for a given feature name takes effect" - so
+# whichever AndroidBottomBar entry appears first in enable-features is the one
+# that counts. This appended its params last until a report made the cost
+# obvious: issue 5 answered the most-asked-for feature by telling people to set
+# chrome://flags#android-bottom-bar by hand, most of those choices are
+# variations without "with NTP", and every one of them would have kept
+# disable_on_ntp at its default of true and gone on hiding the bar on the new
+# tab page after this shipped - looking exactly like the bug that had just been
+# fixed for them.
+#
+# Overriding a deliberate chrome://flags choice is a real cost and worth naming
+# rather than glossing: what makes it the right way round here is that this
+# feature has a Settings switch of its own, so the flag is no longer the way to
+# ask for it. Anyone who does want a different variation still gets it by
+# turning the Aerium switch off, which stops this from appending anything at
+# all and hands the feature back to chrome://flags entirely. Note the first restart after toggling may not pick the params
 # up: Chromium caches field-trial params in shared preferences and reads them
 # at the following start, so a second restart settles it.
 sed_i 's|    public static final String AERIUM_BLACKEN_DARK_SITES = "Chrome.Aerium.BlackenDarkSites";|&\n\n    /** Whether Aerium shows the bottom bar, which also moves the tab switcher new-tab button. */\n    public static final String AERIUM_BOTTOM_BAR = "Chrome.Aerium.BottomBar";|' \
@@ -5352,7 +5371,7 @@ sed_i 's|^                AERIUM_EXTERNAL_DOWNLOAD_MANAGER,$|                AER
 
 # Distinct local names: the blacken-dark-sites block below already declares
 # commandLine, existing and merged in this same scope.
-sed_i 's%            FontPreloader.getInstance().load(getApplication());%&\n\n            // Aerium: features are fixed when the process starts, so the bottom\n            // bar goes on the command line here rather than being flipped live.\n            if (ChromeSharedPreferences.getInstance()\n                    .readBoolean(ChromePreferenceKeys.AERIUM_BOTTOM_BAR, true)) {\n                CommandLine bottomBarLine = CommandLine.getInstance();\n                String bottomBarExisting = bottomBarLine.getSwitchValue("enable-features");\n                String bottomBarFeature =\n                        "AndroidBottomBar:show_bottom_bar_on_gts/true/disable_on_ntp/false";\n                String bottomBarMerged =\n                        (bottomBarExisting == null || bottomBarExisting.isEmpty())\n                                ? bottomBarFeature\n                                : bottomBarExisting + "," + bottomBarFeature;\n                bottomBarLine.appendSwitchWithValue("enable-features", bottomBarMerged);\n            }%' \
+sed_i 's%            FontPreloader.getInstance().load(getApplication());%&\n\n            // Aerium: features are fixed when the process starts, so the bottom\n            // bar goes on the command line here rather than being flipped live.\n            //\n            // Ours goes FIRST in the merged value, ahead of anything already\n            // there. FeatureList::RegisterOverride() uses try_emplace, and says\n            // so in as many words - "only the first override for a given\n            // feature name takes effect" - so with this appended last, an\n            // AndroidBottomBar entry set from chrome://flags won and the params\n            // below were silently dropped. Everyone told to enable that flag by\n            // hand before this shipped is in exactly that position.\n            if (ChromeSharedPreferences.getInstance()\n                    .readBoolean(ChromePreferenceKeys.AERIUM_BOTTOM_BAR, true)) {\n                CommandLine bottomBarLine = CommandLine.getInstance();\n                String bottomBarExisting = bottomBarLine.getSwitchValue("enable-features");\n                String bottomBarFeature =\n                        "AndroidBottomBar:show_bottom_bar_on_gts/true/disable_on_ntp/false";\n                String bottomBarMerged =\n                        (bottomBarExisting == null || bottomBarExisting.isEmpty())\n                                ? bottomBarFeature\n                                : bottomBarFeature + "," + bottomBarExisting;\n                bottomBarLine.appendSwitchWithValue("enable-features", bottomBarMerged);\n            }%' \
     $CAI
 
 sed_i 's|^</PreferenceScreen>$|    <org.chromium.components.browser_ui.settings.ChromeSwitchPreference\n        android:key="aerium_bottom_bar"\n        android:title="@string/aerium_bottom_bar_title"\n        android:summary="@string/aerium_bottom_bar_summary" />\n&|' \
